@@ -204,3 +204,55 @@ fn print_program(
 
     Ok((src, src_map_buf))
 }
+
+#[cfg(test)]
+mod tests {
+    use turbopack_core::{chunk::MangleType, code_builder::CodeBuilder};
+
+    use super::minify;
+
+    fn minify_str(src: &str, mangle: Option<MangleType>) -> String {
+        let mut builder = CodeBuilder::new(false, false);
+        std::io::Write::write_all(&mut builder, src.as_bytes()).unwrap();
+        let code = minify(builder.build(), false, mangle).unwrap();
+        code.source_code().to_str().unwrap().into_owned()
+    }
+
+    /// Strict factories are grouped under a single `"use strict"` wrapper (see `factory_group.rs`)
+    /// and the directive is removed from the factories themselves. If the minifier drops or
+    /// inlines that wrapper, the strict modules silently run in sloppy mode (`this` becomes
+    /// `globalThis` inside plain function calls).
+    #[test]
+    fn keeps_strict_mode_directive_of_grouped_factories() {
+        let strict_factory = |id: u32| {
+            format!(
+                "{id}, ((__turbopack_context__) => {{\n\"use strict\";\n\nfunction GET() {{\n    \
+                 return function() {{ return this; }}() === \
+                 undefined;\n}}\n__turbopack_context__.s([\"GET\", 0, GET]);\n}}),\n"
+            )
+        };
+        let sloppy_factory = "100, ((__turbopack_context__, module, exports) => {\nexports.x = \
+                              Object.defineProperty;\n}),\n";
+        let strict: String = (0..3).map(strict_factory).collect();
+
+        let mixed = format!(
+            "module.exports = [\n(()=>{{\"use \
+             strict\";return[\n{strict}]}})(),\n{sloppy_factory}];"
+        );
+        let all_strict = format!("(()=>{{\"use strict\";module.exports = [\n{strict}];}})()");
+
+        for src in [mixed, all_strict] {
+            for mangle in [
+                None,
+                Some(MangleType::OptimalSize),
+                Some(MangleType::Deterministic),
+            ] {
+                let out = minify_str(&src, mangle);
+                assert!(
+                    out.contains("\"use strict\""),
+                    "minifier dropped the strict mode directive: {out}"
+                );
+            }
+        }
+    }
+}
